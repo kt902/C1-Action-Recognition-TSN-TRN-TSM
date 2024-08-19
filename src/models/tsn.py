@@ -286,6 +286,7 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
         # features: (B * T, C')
         features = features.view((batch_size, n_segments) + features.shape[1:])
         # features: (B, T, C')
+        print(features.dim())
         return features
 
     def logits(self, xs: torch.Tensor) -> torch.Tensor:

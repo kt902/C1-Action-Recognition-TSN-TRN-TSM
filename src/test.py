@@ -101,6 +101,7 @@ def main(args):
 
     system = EpicActionRecognitionSystem(cfg)
     system.load_state_dict(ckpt["state_dict"])
+    system.to('cpu')  
     if not cfg.get("log_graph", True):
         # MTRN can't be traced due to the model stochasticity so causes a JIT tracer
         # error, we allow you to prevent the tracer from running to log the graph when
@@ -117,6 +118,7 @@ def main(args):
     if args.datadir is not None:
         data_dir_key = f"{args.split}_gulp_dir"
         cfg.data[data_dir_key] = args.datadir
+        cfg.data['worker_count'] = 10
 
     # Since we don't support writing results when using DP or DDP
     LOG.info("Disabling DP/DDP")
@@ -124,7 +126,10 @@ def main(args):
 
     n_gpus = 1
     LOG.info(f"Overwriting number of GPUs to {n_gpus}")
-    cfg.trainer.gpus = n_gpus
+    cfg.trainer.gpus = 0
+    if 'distributed_backend' in cfg.trainer:
+        del cfg.trainer['distributed_backend']  # Ensure no distributed backend is set
+
     cfg["test.results_path"] = str(args.results)
 
     data_module = EpicActionRecogintionDataModule(cfg)
@@ -154,3 +159,10 @@ def update_deprecated_cfg_options(cfg) -> None:
 
 if __name__ == "__main__":
     main(parser.parse_args())
+
+
+
+
+
+# python ./gulp_data.py ../../P01_101 ../../P01_101_gulp EPIC_100_train.pkl rgb
+# python ./test.py  --datadir ../../P01_101_gulp  ../models/tsn_rgb.ckpt ./here.pkl

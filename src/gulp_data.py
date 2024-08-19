@@ -54,7 +54,7 @@ def main(args):
     if args.labels.suffix.lower() == ".pkl":
         labels = pd.read_pickle(args.labels)
     elif args.labels.suffix.lower() == ".csv":
-        labels = pd.read_csv(args.labels, index_col="uid")
+        labels = pd.read_csv(args.labels, index_col="narration_id")
     else:
         raise ValueError("Expected .csv or .pkl suffix for annotation file")
     if args.modality.lower() == "flow":

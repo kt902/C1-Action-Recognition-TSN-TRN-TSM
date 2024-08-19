@@ -222,6 +222,7 @@ class EpicActionRecognitionSystem(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         data, labels_dict = batch
+        print(labels_dict)
         outputs = self.forward_tasks(data)
 
         return {
@@ -245,6 +246,7 @@ class EpicActionRecognitionSystem(pl.LightningModule):
 
     def _step(self, batch: Tuple[torch.Tensor, Dict[str, Any]]) -> Dict[str, Any]:
         data, labels_dict = batch
+        print(labels_dict)
         outputs: Dict[str, Tensor] = self.forward_tasks(data)
         tasks = {
             task: {
