@@ -124,7 +124,10 @@ def main(args):
 
     n_gpus = 1
     LOG.info(f"Overwriting number of GPUs to {n_gpus}")
-    cfg.trainer.gpus = n_gpus
+    cfg.trainer.gpus = 1
+    # if 'distributed_backend' in cfg.trainer:
+    #     del cfg.trainer['distributed_backend']  # Ensure no distributed backend is set
+
     cfg["test.results_path"] = str(args.results)
 
     data_module = EpicActionRecogintionDataModule(cfg)

@@ -3,10 +3,11 @@ from typing import Any
 from typing import Dict
 from typing import Iterator
 from typing import List
-
+import os
 import pandas as pd
 from gulpio2.adapters import AbstractDatasetAdapter
 from gulpio2.utils import resize_images
+import subprocess
 
 
 Result = Dict[str, Any]
@@ -67,8 +68,26 @@ class EpicDatasetAdapter(AbstractDatasetAdapter):
         """
         slice_element = slice_element or slice(0, len(self))
         for meta in self.meta_data[slice_element]:
+            # List of directories to check
+            directories = [
+                f"/home/ec2-user/environment/epic-torrents-1/2g1n6qdydwa9u22shpxqzp0t8m/{meta['participant_id']}/rgb_frames/{meta['video_id']}",
+                f"/home/ec2-user/environment/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/train/{meta['participant_id']}/{meta['video_id']}",
+                f"/home/ec2-user/environment/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/test/{meta['participant_id']}/{meta['video_id']}",
+            ]
+
+            # Loop through directories and find the first match
+            folder = None
+            for directory in directories:
+                tar_file_path = f"{directory}.tar"
+                parent_directory = os.path.dirname(tar_file_path)
+                if os.path.exists(tar_file_path):
+                    folder = directory
+                    if not os.path.exists(directory):
+                        subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
+                    break
+                        
             folder = (
-                Path(self.video_segment_dir) / meta["participant_id"] / meta["video_id"]
+                Path(folder)
             )
             paths = [
                 folder / f"frame_{idx:010d}.jpg"
