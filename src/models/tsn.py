@@ -39,6 +39,7 @@ from ops.trn import return_TRN
 from torch import nn
 from torch.nn.init import constant_
 from torch.nn.init import normal_
+import torch.nn.functional as F
 
 LOG = logging.getLogger(__name__)
 
@@ -90,6 +91,10 @@ class TSN(nn.Module):
         img_feature_dim: int = 256,
         partial_bn: bool = True,
         pretrained: str = "imagenet",
+        num_verbs: int = 97,  # Number of verb classes
+        num_nouns: int = 300,  # Number of noun classes
+        embedding_dim: int = 256,  # Dimension of embeddings for verb and noun,
+        hidden_dim: int = 256,
     ):
 
         super(TSN, self).__init__()
@@ -102,6 +107,11 @@ class TSN(nn.Module):
         self.img_feature_dim = img_feature_dim
         self._enable_pbn = partial_bn
         self.pretrained = pretrained
+
+        # Embedding layers for verb and noun labels
+        self.verb_embedding = nn.Embedding(num_verbs, embedding_dim)
+        self.noun_embedding = nn.Embedding(num_nouns, embedding_dim)
+        
 
         if segment_length is None:
             self.segment_length = 1 if modality == "RGB" else 5
@@ -129,6 +139,11 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
             self.base_model, self.base_model.last_layer_name
         ).in_features
         self._prepare_tsn()
+
+        # Additional fully connected layer to combine features and embeddings
+        self.combined_fc = nn.Linear(self.feature_dim + 2 * embedding_dim, hidden_dim)
+        self.output_fc = nn.Linear(hidden_dim, 1)  # Final output for regression
+
 
         if self.modality == "Flow":
             LOG.info("Converting the ImageNet model to a flow init model")
@@ -297,13 +312,31 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
         # xs: (B, C')
         return xs
 
-    def forward(
-        self, xs: torch.Tensor
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    def forward(self, xs: torch.Tensor, verb_labels: torch.Tensor, noun_labels: torch.Tensor) -> torch.Tensor:
         # xs: (BS, T, C, H, W)
-        xs = self.features(xs)
-        xs = self.logits(xs)
-        return xs
+        # xs = self.features(xs)
+        # xs = self.logits(xs)
+        # return xs
+
+         # Extract features using TSN backbone
+        features = self.features(xs)
+        features = self.consensus(features)  # Temporal aggregation
+
+        # Get embeddings for verb and noun labels
+        verb_embed = self.verb_embedding(verb_labels)
+        noun_embed = self.noun_embedding(noun_labels)
+
+        # Combine features with embeddings
+        combined = torch.cat([features, verb_embed, noun_embed], dim=1)
+
+        # Pass through the combined fully connected layers
+        x = F.relu(self.combined_fc(combined))
+        output = self.output_fc(x)
+
+        # Apply sigmoid to constrain outputs between 0 and 1
+        output = torch.sigmoid(output)
+        
+        return output.squeeze()  # Return the scalar output
 
     def _construct_flow_model(self, base_model):
         # modify the convolution layers

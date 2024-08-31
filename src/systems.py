@@ -34,6 +34,7 @@ from models.tsn import MTRN
 from models.tsn import TSN
 
 TASK_CLASS_COUNTS = [("verb", 97), ("noun", 300)]
+TASK_CLASS_COUNTS_BY_TASK = {key: value for (key, value) in TASK_CLASS_COUNTS}
 LOG = logging.getLogger(__name__)
 
 
@@ -210,24 +211,42 @@ class EpicActionRecognitionSystem(pl.LightningModule):
         return split_task_outputs(self(xs), TASK_CLASS_COUNTS)
 
     def training_step(self, batch, batch_idx):
-        step_results = self._step(batch)
+        data, labels_dict = batch
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
+        quality_scores = labels_dict["quality_score"]
 
-        self.log_metrics(step_results, "train")
-        return step_results["loss"]
+        outputs = self.model(data, verb_labels, noun_labels)
+        loss = F.mse_loss(outputs, quality_scores)
+
+        self.log("train_loss", loss)
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        step_results = self._step(batch)
-        self.log_metrics(step_results, "val")
-        return step_results['loss']
+        data, labels_dict = batch
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
+        quality_scores = labels_dict["quality_score"]
+
+        outputs = self.model(data, verb_labels, noun_labels)
+        loss = F.mse_loss(outputs, quality_scores)
+
+        self.log("val_loss", loss)
+        return loss
 
     def test_step(self, batch, batch_idx):
         data, labels_dict = batch
-        print(labels_dict)
-        outputs = self.forward_tasks(data)
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
 
+        # Forward pass through the model
+        outputs = self.model(data, verb_labels, noun_labels)
+
+        # Since this is the test step, you may want to return the outputs for further analysis
         return {
-            "verb_output": outputs["verb"].detach().cpu().numpy(),
-            "noun_output": outputs["noun"].detach().cpu().numpy(),
+            "output": outputs.detach().cpu().numpy(),  # Detach and move to CPU for analysis
+            "verb_labels": verb_labels.detach().cpu().numpy(),
+            "noun_labels": noun_labels.detach().cpu().numpy(),
             "narration_id": labels_dict["narration_id"],
             "video_id": labels_dict["video_id"],
         }
@@ -246,8 +265,8 @@ class EpicActionRecognitionSystem(pl.LightningModule):
 
     def _step(self, batch: Tuple[torch.Tensor, Dict[str, Any]]) -> Dict[str, Any]:
         data, labels_dict = batch
-        print(labels_dict)
-        outputs: Dict[str, Tensor] = self.forward_tasks(data)
+        # print(labels_dict)
+        outputs: Dict[str, Tensor] = self.forward_tasks(data, labels_dict["verb_class"], labels_dict["noun_class"]) 
         tasks = {
             task: {
                 "output": outputs[task],
@@ -261,7 +280,8 @@ class EpicActionRecognitionSystem(pl.LightningModule):
         loss = 0
         n_tasks = len(tasks)
         for task, d in tasks.items():
-            task_loss = F.cross_entropy(d["output"], d["labels"])
+            # task_loss = F.cross_entropy(d["output"], d["labels"])
+            task_loss = F.mse_loss(d["output"], d["labels"])  # Use MSE loss for regression
             loss += d["weight"] * task_loss
 
             accuracy_1, accuracy_5 = accuracy(d["output"], d["labels"], ks=(1, 5))
@@ -281,6 +301,8 @@ def load_model(cfg: DictConfig) -> TSN:
     if cfg.model.type == "TSN":
         model = TSN(
             num_class=output_dim,
+            # num_verb_classes=TASK_CLASS_COUNTS_BY_TASK['verb'],
+            # num_noun_classes=TASK_CLASS_COUNTS_BY_TASK['noun'],
             num_segments=cfg.data.frame_count,
             modality=cfg.modality,
             base_model=cfg.model.backbone,
