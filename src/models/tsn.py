@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 # Copyright (c) 2016, Multimedia Laboratory, The Chinese University of Hong Kong
 # All rights reserved.
@@ -39,6 +40,7 @@ from ops.trn import return_TRN
 from torch import nn
 from torch.nn.init import constant_
 from torch.nn.init import normal_
+import torch.nn.functional as F
 
 LOG = logging.getLogger(__name__)
 
@@ -90,6 +92,10 @@ class TSN(nn.Module):
         img_feature_dim: int = 256,
         partial_bn: bool = True,
         pretrained: str = "imagenet",
+        num_verbs: int = 97,  # Number of verb classes
+        num_nouns: int = 300,  # Number of noun classes
+        embedding_dim: int = 256,  # Dimension of embeddings for verb and noun,
+        hidden_dim: int = 256,
     ):
 
         super(TSN, self).__init__()
@@ -102,6 +108,11 @@ class TSN(nn.Module):
         self.img_feature_dim = img_feature_dim
         self._enable_pbn = partial_bn
         self.pretrained = pretrained
+
+        # Embedding layers for verb and noun labels
+        self.verb_embedding = nn.Embedding(num_verbs, embedding_dim)
+        self.noun_embedding = nn.Embedding(num_nouns, embedding_dim)
+        
 
         if segment_length is None:
             self.segment_length = 1 if modality == "RGB" else 5
@@ -130,6 +141,14 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
         ).in_features
         self._prepare_tsn()
 
+        # Define fully connected layers for combined features and embeddings
+        self.combined_fc1 = nn.Linear(self.feature_dim + 2 * embedding_dim, hidden_dim)
+        self.dropout1 = nn.Dropout(p=self.dropout)  # Dropout after combined_fc1
+        self.combined_fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout2 = nn.Dropout(p=self.dropout)  # Dropout after combined_fc2
+        self.output_fc = nn.Linear(hidden_dim, 1)  # Final output for regression
+
+
         if self.modality == "Flow":
             LOG.info("Converting the ImageNet model to a flow init model")
             self.base_model = self._construct_flow_model(self.base_model)
@@ -144,6 +163,22 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
 
         if partial_bn:
             self.partialBN(True)
+
+        # Freeze original components
+        self.freeze_original_components()
+
+    def freeze_original_components(self):
+        # Freeze the backbone (base model)
+        for param in self.base_model.parameters():
+            param.requires_grad = False
+
+        # Freeze the consensus module if needed
+        for param in self.consensus.parameters():
+            param.requires_grad = False
+
+        # Optionally freeze other components if required
+        # for param in self.new_fc.parameters():
+        #     param.requires_grad = False
 
     def _initialise_layer(self, layer, mean=0, std=0.001):
         normal_(layer.weight, mean, std)
@@ -204,6 +239,7 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
         normal_weight = []
         normal_bias = []
         bn = []
+        embedding_params = []
 
         conv_cnt = 0
         bn_cnt = 0
@@ -225,13 +261,12 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
                 if len(ps) == 2:
                     normal_bias.append(ps[1])
 
-            elif isinstance(m, torch.nn.BatchNorm1d):
+            elif isinstance(m, torch.nn.BatchNorm1d) or isinstance(m, torch.nn.BatchNorm2d):
                 bn.extend(list(m.parameters()))
-            elif isinstance(m, torch.nn.BatchNorm2d):
-                bn_cnt += 1
-                # later BN's are frozen
-                if not self._enable_pbn or bn_cnt == 1:
-                    bn.extend(list(m.parameters()))
+
+            elif isinstance(m, torch.nn.modules.sparse.Embedding):
+                embedding_params.extend(list(m.parameters()))
+
             elif len(m._modules) == 0:
                 if len(list(m.parameters())) > 0:
                     raise ValueError(
@@ -265,7 +300,18 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
                 "decay_mult": 0,
                 "name": "normal_bias",
             },
-            {"params": bn, "lr_mult": 1, "decay_mult": 0, "name": "BN scale/shift"},
+            {
+                "params": bn,
+                "lr_mult": 1,
+                "decay_mult": 0,
+                "name": "BN scale/shift",
+            },
+            {
+                "params": embedding_params,
+                "lr_mult": 1,
+                "decay_mult": 0,
+                "name": "embedding_params",
+            },
         ]
 
     def features(self, input: torch.Tensor) -> torch.Tensor:
@@ -296,13 +342,33 @@ Initializing {self.__class__.__name__} with base model: {base_model}.
         # xs: (B, C')
         return xs
 
-    def forward(
-        self, xs: torch.Tensor
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    def forward(self, xs: torch.Tensor, verb_labels: torch.Tensor, noun_labels: torch.Tensor) -> torch.Tensor:
         # xs: (BS, T, C, H, W)
-        xs = self.features(xs)
-        xs = self.logits(xs)
-        return xs
+        # Extract features using TSN backbone
+        features = self.features(xs)
+        features = self.consensus(features)  # Temporal aggregation
+
+        # Get embeddings for verb and noun labels
+        verb_embed = self.verb_embedding(verb_labels)
+        noun_embed = self.noun_embedding(noun_labels)
+
+        # Combine features with embeddings
+        combined = torch.cat([features, verb_embed, noun_embed], dim=1)
+
+        # Pass through the combined fully connected layers with dropout
+        x = F.relu(self.combined_fc1(combined))
+        x = self.dropout1(x)  # Apply dropout after first FC layer
+
+        x = F.relu(self.combined_fc2(x))
+        x = self.dropout2(x)  # Apply dropout after second FC layer
+
+        output = self.output_fc(x)
+
+        # Apply sigmoid to constrain outputs between 0 and 1
+        output = torch.sigmoid(output)
+        
+        return output.squeeze()  # Return the scalar output
+
 
     def _construct_flow_model(self, base_model):
         # modify the convolution layers

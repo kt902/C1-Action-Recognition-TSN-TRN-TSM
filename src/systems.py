@@ -14,7 +14,7 @@ from datasets import EpicVideoFlowDataset
 from datasets import TsnDataset
 from omegaconf import DictConfig
 from torch import Tensor
-from torch.optim import SGD
+from torch.optim import SGD, Adam
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import ConcatDataset
 from torch.utils.data import DataLoader
@@ -28,12 +28,14 @@ from transforms import GroupScale
 from transforms import Stack
 from transforms import ToTorchFormatTensor
 from utils.torch_metrics import accuracy
+import numpy as np
 
 from models.tsm import TSM
 from models.tsn import MTRN
 from models.tsn import TSN
 
 TASK_CLASS_COUNTS = [("verb", 97), ("noun", 300)]
+TASK_CLASS_COUNTS_BY_TASK = {key: value for (key, value) in TASK_CLASS_COUNTS}
 LOG = logging.getLogger(__name__)
 
 
@@ -177,24 +179,34 @@ class EpicActionRecognitionSystem(pl.LightningModule):
         self.save_hyperparameters(cfg)
         self.model = load_model(cfg)
         channels = cfg.data.segment_length * (3 if cfg.modality == "RGB" else 2)
-        self.example_input_array = torch.randn(  # type: ignore
-            (
+        self.example_input_array = (
+            torch.randn(  # example video data
                 1,
                 cfg.data.frame_count,
                 channels,
                 cfg.data.preprocessing.input_size,
                 cfg.data.preprocessing.input_size,
-            )
+            ),
+            torch.tensor([0]),  # dummy verb label
+            torch.tensor([0]),  # dummy noun label
         )
 
     def configure_optimizers(self):
         cfg = self.cfg.learning
         if cfg.optimizer.type == "SGD":
-            optimizer = SGD(
+            # optimizer = SGD(
+            #     self.model.get_optim_policies(),
+            #     lr=cfg.lr,
+            #     momentum=cfg.optimizer.momentum,
+            #     weight_decay=cfg.optimizer.weight_decay,
+            # )
+            optimizer = Adam(
                 self.model.get_optim_policies(),
-                lr=cfg.lr,
-                momentum=cfg.optimizer.momentum,
-                weight_decay=cfg.optimizer.weight_decay,
+                # lr=cfg.lr,
+                lr=1e-3,                  # Learning rate (0.001 is a good default)
+                betas=(0.9, 0.999),       # Coefficients used for computing running averages of gradient and its square
+                eps=1e-8,                 # Term added to the denominator to improve numerical stability
+                weight_decay=0            # L2 penalty (0 means no weight decay, often set to a small value like 1e-4)
             )
         else:
             raise ValueError(f"Unknown optimizer type: {cfg.optimizer.type}")
@@ -203,30 +215,62 @@ class EpicActionRecognitionSystem(pl.LightningModule):
         )
         return [optimizer], [scheduler]
 
-    def forward(self, xs):
-        return self.model(xs)
+    def forward(self, xs, verb_labels, noun_labels):
+        return self.model(xs, verb_labels, noun_labels)
 
-    def forward_tasks(self, xs: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return split_task_outputs(self(xs), TASK_CLASS_COUNTS)
+    def forward_tasks(self, xs: torch.Tensor, verb_labels: torch.Tensor, noun_labels: torch.Tensor) -> Dict[str, torch.Tensor]:
+        return split_task_outputs(self(xs, verb_labels, noun_labels), TASK_CLASS_COUNTS)
 
     def training_step(self, batch, batch_idx):
-        step_results = self._step(batch)
+        data, labels_dict = batch
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
+        quality_scores = labels_dict["quality_score"].float()
 
-        self.log_metrics(step_results, "train")
-        return step_results["loss"]
+        outputs = self.model(data, verb_labels, noun_labels)
+        if outputs.dim() == 0:
+            outputs = outputs.unsqueeze(0)
+        
+        # print(f"{outputs.size()},{quality_scores.size()},")
+        loss = torch.nn.SmoothL1Loss()(outputs, quality_scores)
+        loss = F.l1_loss(outputs, quality_scores)
+        
+        loss = torch.nn.SmoothL1Loss()(outputs, quality_scores)
+
+        self.log("train_loss", loss)
+        self.log('train_mse_loss', F.mse_loss(outputs, quality_scores))
+        self.log('train_l1_loss', F.l1_loss(outputs, quality_scores))
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        step_results = self._step(batch)
-        self.log_metrics(step_results, "val")
-        return step_results['loss']
+        data, labels_dict = batch
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
+        quality_scores = labels_dict["quality_score"]
+
+        outputs = self.model(data, verb_labels, noun_labels)
+        loss = F.mse_loss(outputs, quality_scores)
+
+        self.log("val_loss", loss)
+        return loss
 
     def test_step(self, batch, batch_idx):
         data, labels_dict = batch
-        outputs = self.forward_tasks(data)
+        verb_labels = labels_dict["verb_class"]
+        noun_labels = labels_dict["noun_class"]
 
+        # Forward pass through the model
+        outputs = self.model(data, verb_labels, noun_labels)
+
+        outputs = outputs.detach().cpu().numpy()
+        if outputs.ndim == 0:
+            outputs = np.expand_dims(outputs, 0)
+
+        # Since this is the test step, you may want to return the outputs for further analysis
         return {
-            "verb_output": outputs["verb"].detach().cpu().numpy(),
-            "noun_output": outputs["noun"].detach().cpu().numpy(),
+            "output": outputs,  # Detach and move to CPU for analysis
+            # "verb_labels": verb_labels.detach().cpu().numpy(),
+            # "noun_labels": noun_labels.detach().cpu().numpy(),
             "narration_id": labels_dict["narration_id"],
             "video_id": labels_dict["video_id"],
         }
@@ -245,7 +289,8 @@ class EpicActionRecognitionSystem(pl.LightningModule):
 
     def _step(self, batch: Tuple[torch.Tensor, Dict[str, Any]]) -> Dict[str, Any]:
         data, labels_dict = batch
-        outputs: Dict[str, Tensor] = self.forward_tasks(data)
+        # print(labels_dict)
+        outputs: Dict[str, Tensor] = self.forward_tasks(data, labels_dict["verb_class"], labels_dict["noun_class"]) 
         tasks = {
             task: {
                 "output": outputs[task],
@@ -259,7 +304,8 @@ class EpicActionRecognitionSystem(pl.LightningModule):
         loss = 0
         n_tasks = len(tasks)
         for task, d in tasks.items():
-            task_loss = F.cross_entropy(d["output"], d["labels"])
+            # task_loss = F.cross_entropy(d["output"], d["labels"])
+            task_loss = F.mse_loss(d["output"], d["labels"])  # Use MSE loss for regression
             loss += d["weight"] * task_loss
 
             accuracy_1, accuracy_5 = accuracy(d["output"], d["labels"], ks=(1, 5))
@@ -279,6 +325,8 @@ def load_model(cfg: DictConfig) -> TSN:
     if cfg.model.type == "TSN":
         model = TSN(
             num_class=output_dim,
+            # num_verb_classes=TASK_CLASS_COUNTS_BY_TASK['verb'],
+            # num_noun_classes=TASK_CLASS_COUNTS_BY_TASK['noun'],
             num_segments=cfg.data.frame_count,
             modality=cfg.modality,
             base_model=cfg.model.backbone,

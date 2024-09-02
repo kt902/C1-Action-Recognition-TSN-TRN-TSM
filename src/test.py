@@ -68,6 +68,8 @@ class ResultsSaver(Callback):
         for k, vs in batch_outputs.items():
             if isinstance(vs, torch.Tensor):
                 vs = vs.detach().cpu().numpy()
+                if vs.ndim == 0:
+                    vs = np.expand_dims(vs, 0)
             self.results[dataset_name][k].extend(vs)
 
     def save_results(self, dataset_name: str, filepath: Union[str, Path]):
@@ -81,7 +83,21 @@ class ResultsSaver(Callback):
 
         with open(filepath, "wb") as f:
             pickle.dump(new_results_dict, f)
+        
+def load_state_dict_with_fallback(model, state_dict):
+    model_state_dict = model.state_dict()
 
+    # Filter out unnecessary keys
+    filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
+
+    # Load the weights
+    model_state_dict.update(filtered_state_dict)
+    model.load_state_dict(model_state_dict)
+
+    # Print information about missing keys
+    missing_keys = [k for k in model_state_dict.keys() if k not in filtered_state_dict]
+    if missing_keys:
+        print(f"Warning: The following keys are missing from the checkpoint and were randomly initialized: {missing_keys}")
 
 def main(args):
     logging.basicConfig(level=logging.INFO)
@@ -106,7 +122,10 @@ def main(args):
 
 
     system = EpicActionRecognitionSystem(cfg)
-    system.load_state_dict(ckpt["state_dict"])
+    # system.load_state_dict(ckpt["state_dict"])
+    #  Use the custom loading function
+    load_state_dict_with_fallback(system, ckpt["state_dict"])
+
     if not cfg.get("log_graph", True):
         # MTRN can't be traced due to the model stochasticity so causes a JIT tracer
         # error, we allow you to prevent the tracer from running to log the graph when
