@@ -82,8 +82,8 @@ class EpicDatasetAdapter(AbstractDatasetAdapter):
                 parent_directory = os.path.dirname(tar_file_path)
                 if os.path.exists(tar_file_path):
                     folder = directory
-                    if not os.path.exists(directory):
-                        subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
+                    # if not os.path.exists(directory):
+                    #     subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
                     break
                         
             folder = (
@@ -93,7 +93,14 @@ class EpicDatasetAdapter(AbstractDatasetAdapter):
                 folder / f"frame_{idx:010d}.jpg"
                 for idx in range(meta["start_frame"], meta["stop_frame"] + 1)
             ]
-            frames = list(resize_images(map(str, paths), self.frame_size))
+            try:
+                frames = list(resize_images(map(str, paths), self.frame_size))
+            except Exception as e:
+                parent_directory = os.path.dirname(directory)
+                subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
+
+                frames = list(resize_images(map(str, paths), self.frame_size))
+
             meta["frame_size"] = frames[0].shape
             meta["num_frames"] = len(frames)
 
@@ -102,7 +109,7 @@ class EpicDatasetAdapter(AbstractDatasetAdapter):
 
     def get_uid(self, meta):
         if "narration_id" in meta:
-            id_ = meta["narration_id"]
+            id_ = f'{meta["narration_id"]}.{meta["verb_class"]}.{meta["noun_class"]}'
         elif "uid" in meta:
             id_ = meta["uid"]
         else:
