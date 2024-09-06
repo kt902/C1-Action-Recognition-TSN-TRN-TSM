@@ -8,7 +8,7 @@ import pandas as pd
 from gulpio2.adapters import AbstractDatasetAdapter
 from gulpio2.utils import resize_images
 import subprocess
-
+from decord import VideoReader, cpu
 
 Result = Dict[str, Any]
 
@@ -68,38 +68,48 @@ class EpicDatasetAdapter(AbstractDatasetAdapter):
         """
         slice_element = slice_element or slice(0, len(self))
         for meta in self.meta_data[slice_element]:
-            # List of directories to check
-            directories = [
-                f"/home/ec2-user/environment/epic-torrents-1/2g1n6qdydwa9u22shpxqzp0t8m/{meta['participant_id']}/rgb_frames/{meta['video_id']}",
-                f"/home/ec2-user/environment/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/train/{meta['participant_id']}/{meta['video_id']}",
-                f"/home/ec2-user/environment/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/test/{meta['participant_id']}/{meta['video_id']}",
-            ]
+            if len(meta['video_id'].split('_')) == 4:
+                with open(f"/home/ec2-user/environment/my-dissertation/augmentation-pipeline/out/generated/{meta['video_id']}.mp4", 'rb') as fid:
+                    # Load a video
+                    vr = VideoReader(fid, ctx=cpu(0))
+                    
+                    frames = vr.get_batch(range(0, len(vr) - 1))
+                    # `frame` is a decord NDArray, which can be converted to a numpy array
+                    frames = frames.asnumpy()
+            else:
+                # List of directories to check
+                directories = [
+                    f"/home/ec2-user/environment/torrents/epic-torrents-1/2g1n6qdydwa9u22shpxqzp0t8m/{meta['participant_id']}/rgb_frames/{meta['video_id']}",
+                    f"/home/ec2-user/environment/torrents/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/train/{meta['participant_id']}/{meta['video_id']}",
+                    f"/home/ec2-user/environment/torrents/epic-torrents/3h91syskeag572hl6tvuovwv4d/frames_rgb_flow/rgb/test/{meta['participant_id']}/{meta['video_id']}",
+                ]
 
-            # Loop through directories and find the first match
-            folder = None
-            for directory in directories:
-                tar_file_path = f"{directory}.tar"
-                parent_directory = os.path.dirname(tar_file_path)
-                if os.path.exists(tar_file_path):
-                    folder = directory
-                    # if not os.path.exists(directory):
-                    #     subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
-                    break
-                        
-            folder = (
-                Path(folder)
-            )
-            paths = [
-                folder / f"frame_{idx:010d}.jpg"
-                for idx in range(meta["start_frame"], meta["stop_frame"] + 1)
-            ]
-            try:
-                frames = list(resize_images(map(str, paths), self.frame_size))
-            except Exception as e:
-                parent_directory = os.path.dirname(directory)
-                subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
+                # Loop through directories and find the first match
+                folder = None
+                for directory in directories:
+                    tar_file_path = f"{directory}.tar"
+                    parent_directory = os.path.dirname(tar_file_path)
+                    if os.path.exists(tar_file_path):
+                        folder = directory
+                        # if not os.path.exists(directory):
+                        #     subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
+                        break
+                            
+                folder = (
+                    Path(folder)
+                )
+                paths = [
+                    folder / f"frame_{idx:010d}.jpg"
+                    for idx in range(meta["start_frame"], meta["stop_frame"] + 1)
+                ]
+                try:
+                    frames = list(resize_images(map(str, paths), self.frame_size))
+                except Exception as e:
+                    print(e)
+                    parent_directory = os.path.dirname(directory)
+                    subprocess.run(['tar', '-xf', f"{directory}.tar", '--one-top-level'], cwd=parent_directory, check=True)
 
-                frames = list(resize_images(map(str, paths), self.frame_size))
+                    frames = list(resize_images(map(str, paths), self.frame_size))
 
             meta["frame_size"] = frames[0].shape
             meta["num_frames"] = len(frames)

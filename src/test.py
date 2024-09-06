@@ -34,6 +34,12 @@ parser.add_argument(
     help="Overwrite the batch size for loading data, defaults to learning.batch_size",
 )
 parser.add_argument(
+    "--gpus",
+    type=int,
+    help="Overwrite the number of gpus",
+)
+
+parser.add_argument(
     "--datadir",
     default=None,
     help="Overwrite data directory in checkpoint. Useful when testing a checkpoint "
@@ -123,6 +129,8 @@ def main(args):
     cfg.trainer.accelerator = None
 
     n_gpus = 1
+    if args.gpus is not None:
+        n_gpus = args.gpus
     LOG.info(f"Overwriting number of GPUs to {n_gpus}")
     cfg.trainer.gpus = 1
     # if 'distributed_backend' in cfg.trainer:
